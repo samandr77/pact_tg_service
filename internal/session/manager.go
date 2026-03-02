@@ -18,13 +18,15 @@ import (
 type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	rootCtx  context.Context
 	appID    int
 	appHash  string
 }
 
-func NewSessionManager(appID int, appHash string) *SessionManager {
+func NewSessionManager(ctx context.Context, appID int, appHash string) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*Session),
+		rootCtx:  ctx,
 		appID:    appID,
 		appHash:  appHash,
 	}
@@ -37,8 +39,9 @@ func (m *SessionManager) Create(ctx context.Context) (string, string, error) {
 	}
 
 	sess := &Session{
-		id:    id,
-		msgCh: make(chan MessageUpdate, 100),
+		id:       id,
+		msgCh:    make(chan MessageUpdate, 100),
+		logoutCh: make(chan struct{}),
 	}
 
 	dispatcher := tg.NewUpdateDispatcher()
@@ -66,7 +69,7 @@ func (m *SessionManager) Create(ctx context.Context) (string, string, error) {
 		UpdateHandler: dispatcher,
 	})
 
-	sessCtx, cancel := context.WithCancel(ctx)
+	sessCtx, cancel := context.WithCancel(m.rootCtx)
 	sess.client = client
 	sess.cancel = cancel
 
@@ -102,7 +105,13 @@ func (m *SessionManager) Create(ctx context.Context) (string, string, error) {
 			sess.setAuthorised(true)
 			slog.Info("сессия авторизована", "session_id", id)
 
-			<-ctx.Done()
+			select {
+			case <-sess.logoutCh:
+				if _, logoutErr := client.API().AuthLogOut(ctx); logoutErr != nil {
+					slog.Error("auth logout failed", "session_id", id, "err", logoutErr)
+				}
+			case <-ctx.Done():
+			}
 			return nil
 		})
 
@@ -131,13 +140,19 @@ func (m *SessionManager) Get(id string) (*Session, error) {
 
 func (m *SessionManager) Delete(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.sessions[id]
 	if !ok {
+		m.mu.Unlock()
 		return ErrNotFound
 	}
-	s.cancel()
 	delete(m.sessions, id)
+	m.mu.Unlock()
+
+	if s.IsAuthorised() {
+		close(s.logoutCh)
+	} else {
+		s.cancel()
+	}
 	return nil
 }
 
