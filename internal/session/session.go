@@ -19,6 +19,7 @@ type Session struct {
 	client     *telegram.Client
 	cancel     context.CancelFunc
 	msgCh      chan MessageUpdate
+	logoutCh   chan struct{}
 	authorised bool
 	mu         sync.RWMutex
 }
